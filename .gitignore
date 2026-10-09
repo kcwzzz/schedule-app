@@ -1,0 +1,14 @@
+# 로컬 전용 설정
+.claude/settings.local.json
+
+# OS/에디터
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 나중에 Node 도입 시
+node_modules/
+dist/
+
+# 기획 문서는 로컬 전용 (공개 저장소에 올리지 않음)
+PRD.md
