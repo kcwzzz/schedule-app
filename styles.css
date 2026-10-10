@@ -490,6 +490,163 @@ button {
 .item-notes { font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .item.done .item-title { text-decoration: line-through; color: var(--muted); }
 
+/* ---------- 목표 ---------- */
+.goal-chip {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.goal-chip:active { opacity: 0.6; }
+
+.goals { padding: 12px 16px; }
+
+.goal {
+  margin-top: 12px;
+  padding: 4px 0 10px;
+  border-radius: 14px;
+  background: var(--bg);
+}
+
+.goal-head {
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  padding-right: 4px;
+}
+
+.goal .check { --c: var(--accent); min-height: 48px; }
+
+.goal-title {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 0;
+  text-align: left;
+  font-size: 17px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.goal.done .goal-title { color: var(--muted); text-decoration: line-through; }
+.goal.done > .goal-head .check svg { background: var(--accent); border-color: var(--accent); stroke: #fff; }
+
+.goal-progress {
+  flex: none;
+  padding: 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress {
+  height: 4px;
+  margin: 0 14px 6px 48px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.progress i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.subtasks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sub {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding-right: 4px;
+}
+
+.check.small { --c: var(--accent); min-height: 44px; }
+.check.small svg { width: 20px; height: 20px; padding: 2px; }
+.sub.done .check svg { background: var(--accent); border-color: var(--accent); stroke: #fff; }
+
+.sub-title { flex: 1; min-width: 0; font-size: 15px; overflow-wrap: anywhere; }
+.sub.done .sub-title { color: var(--muted); text-decoration: line-through; }
+
+.sub-btn {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.sub-btn:active { background: rgba(127, 127, 127, 0.15); }
+
+.sub-add {
+  display: flex;
+  gap: 6px;
+  margin: 4px 12px 0 48px;
+}
+
+.sub-add input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.sub-add button {
+  width: 38px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 20px;
+}
+
+.ai-link {
+  margin: 8px 0 0 48px;
+  padding: 6px 0;
+  color: var(--ai);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ai-goal {
+  margin: 0 4px 8px;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.count-pick { display: inline-flex; gap: 6px; }
+.count-pick input { position: absolute; opacity: 0; pointer-events: none; }
+
+.count-pick span {
+  display: inline-block;
+  padding: 5px 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 999px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.count-pick input:checked + span { border-color: var(--ai); color: var(--ai); font-weight: 600; }
+.count-pick input:focus-visible + span { outline: 2px solid var(--ai); }
+
+.ai-sheet .group + textarea { margin-top: 12px; }
+
 /* ---------- 추가 버튼 ---------- */
 .fab {
   position: fixed;

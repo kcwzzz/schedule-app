@@ -18,15 +18,19 @@
       const raw = localStorage.getItem(STORE_KEY);
       if (raw) {
         const data = JSON.parse(raw);
-        if (Array.isArray(data.items)) {
-          return {
-            items: data.items,
-            categories: Array.isArray(data.categories) && data.categories.length ? data.categories : DEFAULT_CATEGORIES.slice(),
-          };
-        }
+        if (Array.isArray(data.items)) return normalizeDb(data);
       }
     } catch (e) { /* 손상된 데이터는 무시하고 새로 시작 */ }
-    return { items: [], categories: DEFAULT_CATEGORIES.slice() };
+    return normalizeDb({ items: [] });
+  }
+
+  // goals: [{ id, period: 'week'|'month', key: '2026-10-04'|'2026-10', title, done, subtasks: [{ id, title, done }] }]
+  function normalizeDb(data) {
+    return {
+      items: data.items,
+      categories: Array.isArray(data.categories) && data.categories.length ? data.categories : DEFAULT_CATEGORIES.slice(),
+      goals: Array.isArray(data.goals) ? data.goals : [],
+    };
   }
 
   let db = load();
@@ -138,10 +142,17 @@
   const monthHash = (d) => `#/month/${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
   const weekHash = (d) => `#/week/${ymd(startOfWeek(d))}`;
   const dayHash = (d) => `#/day/${ymd(d)}`;
+  // #/goals/week/2026-10-04 · #/goals/month/2026-10
+  const goalsHash = (period, d) => `#/goals/${period}/${period === 'week' ? ymd(startOfWeek(d)) : `${d.getFullYear()}-${pad(d.getMonth() + 1)}`}`;
 
   function parseRoute() {
-    const [view, arg = ''] = location.hash.replace(/^#\/?/, '').split('/');
+    const [view, arg = '', arg2 = ''] = location.hash.replace(/^#\/?/, '').split('/');
     if (view === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(arg)) return { view: 'day', date: parseYmd(arg) };
+    if (view === 'goals' && arg === 'week' && /^\d{4}-\d{2}-\d{2}$/.test(arg2)) return { view: 'goals', period: 'week', date: startOfWeek(parseYmd(arg2)) };
+    if (view === 'goals' && arg === 'month' && /^\d{4}-\d{2}$/.test(arg2)) {
+      const [y, m] = arg2.split('-').map(Number);
+      return { view: 'goals', period: 'month', date: new Date(y, m - 1, 1) };
+    }
     if (view === 'week' && /^\d{4}-\d{2}-\d{2}$/.test(arg)) return { view: 'week', date: startOfWeek(parseYmd(arg)) };
     if (view === 'month' && /^\d{4}-\d{2}$/.test(arg)) {
       const [y, m] = arg.split('-').map(Number);
@@ -153,6 +164,7 @@
 
   const scrollMemo = {}; // 목록 화면별 스크롤 위치 (상세에서 돌아올 때 복원)
   let returnHash = null; // 상세 페이지로 들어오기 전 목록 화면
+  let goalsReturn = null; // 목표 화면으로 들어오기 전 달력 화면
 
   function go(hash) {
     if (location.hash === hash) render({ scroll: 'today' });
@@ -166,9 +178,9 @@
   function render(opts = {}) {
     const r = parseRoute();
     const y = window.scrollY;
-    app.innerHTML = r.view === 'day' ? renderDay(r.date) : renderList(r.view, r.date);
+    app.innerHTML = r.view === 'day' ? renderDay(r.date) : r.view === 'goals' ? renderGoals(r.period, r.date) : renderList(r.view, r.date);
     app.className = `view-${r.view}`;
-    document.title = r.view === 'day' ? `${fmtMonthDay(r.date)} · 일정` : '일정';
+    document.title = r.view === 'day' ? `${fmtMonthDay(r.date)} · 일정` : r.view === 'goals' ? '목표 · 일정' : '일정';
 
     const scroll = opts.scroll || 'today';
     if (scroll === 'keep') {
@@ -209,12 +221,12 @@
       for (let i = 0; i < 7; i++) days.push(addDays(anchor, i));
       const end = days[6];
       const total = days.reduce((n, d) => n + (map.get(ymd(d)) || []).length, 0);
-      title = anchor.getMonth() === end.getMonth()
-        ? `${anchor.getMonth() + 1}월 ${anchor.getDate()}일 – ${end.getDate()}일`
-        : `${fmtMonthDay(anchor)} – ${fmtMonthDay(end)}`;
-      sub = `${anchor.getFullYear()}년 · 일정 ${total}개`;
+      title = weekTitle(anchor);
+      sub = `일정 ${total}개`;
       body = `<main class="list week">${days.map((d, idx) => renderRow(d, map.get(ymd(d)) || [], idx, today)).join('')}</main>`;
     }
+    const goals = goalsFor(mode, anchor);
+    const goalsDone = goals.filter((g) => g.done).length;
 
     return `
       <header class="topbar">
@@ -227,6 +239,7 @@
           <button class="icon-btn" data-act="menu" aria-label="메뉴">⋯</button>
         </div>
         <div class="topbar-row">
+          <button class="goal-chip" data-act="goals-open" aria-label="${mode === 'month' ? '월간' : '주간'} 목표 보기">🎯 목표${goals.length ? ` ${goalsDone}/${goals.length}` : ''}</button>
           <p class="sub">${sub}</p>
           <span class="spacer"></span>
           <div class="segmented" role="tablist" aria-label="보기 방식">
@@ -237,6 +250,95 @@
       </header>
       ${body}
       ${fabs('')}`;
+  }
+
+  function weekTitle(start) {
+    const end = addDays(start, 6);
+    return start.getMonth() === end.getMonth()
+      ? `${start.getMonth() + 1}월 ${start.getDate()}일 – ${end.getDate()}일`
+      : `${fmtMonthDay(start)} – ${fmtMonthDay(end)}`;
+  }
+
+  // ---------- 목표 (주간/월간) ----------
+  const periodKey = (period, d) => (period === 'week' ? ymd(startOfWeek(d)) : `${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
+
+  function goalsFor(period, d) {
+    const key = periodKey(period, d);
+    return db.goals.filter((g) => g.period === period && g.key === key);
+  }
+
+  function periodLabel(period, d) {
+    return period === 'week' ? weekTitle(startOfWeek(d)) : `${d.getFullYear()}년 ${d.getMonth() + 1}월`;
+  }
+
+  const findGoal = (id) => db.goals.find((g) => g.id === id);
+
+  function touchGoal(g) {
+    g.updatedAt = new Date().toISOString();
+    save();
+  }
+
+  const CHECK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+
+  function renderGoals(period, anchor) {
+    const goals = goalsFor(period, anchor);
+    const unit = period === 'week' ? '주' : '달';
+    const year = period === 'week' ? `${anchor.getFullYear()}년 · ` : '';
+    const doneCount = goals.filter((g) => g.done).length;
+    return `
+      <header class="topbar">
+        <div class="topbar-row">
+          <button class="text-btn back" data-act="goals-back">‹ 달력</button>
+          <span class="spacer"></span>
+          <div class="segmented" role="tablist" aria-label="목표 기간">
+            <button role="tab" aria-selected="${period === 'week'}" class="seg${period === 'week' ? ' active' : ''}" data-act="goals-week">주간 목표</button>
+            <button role="tab" aria-selected="${period === 'month'}" class="seg${period === 'month' ? ' active' : ''}" data-act="goals-month">월간 목표</button>
+          </div>
+        </div>
+        <div class="topbar-row">
+          <button class="icon-btn" data-act="prev" aria-label="이전 ${unit}">‹</button>
+          <h1 class="title">${periodLabel(period, anchor)}</h1>
+          <button class="icon-btn" data-act="next" aria-label="다음 ${unit}">›</button>
+          <span class="spacer"></span>
+          <button class="text-btn" data-act="today">이번 ${unit}</button>
+        </div>
+        <p class="sub">${year}목표 ${goals.length}개${goals.length ? ` · 달성 ${doneCount}개` : ''}</p>
+      </header>
+      <main class="goals">
+        <form class="quick" data-form="goal-add" autocomplete="off">
+          <input name="title" placeholder="이번 ${unit} 목표 추가 (예: 책 한 권 읽기)" maxlength="100" enterkeyhint="done">
+          <button type="submit" class="quick-btn">추가</button>
+        </form>
+        ${goals.length ? goals.map(goalCard).join('') : `<p class="empty">아직 이번 ${unit} 목표가 없어요.<br>위에 목표를 적고, 세부 할 일로 나눠보세요.</p>`}
+      </main>`;
+  }
+
+  function goalCard(g) {
+    const subs = g.subtasks || [];
+    const doneSubs = subs.filter((s) => s.done).length;
+    const pct = subs.length ? Math.round((doneSubs / subs.length) * 100) : g.done ? 100 : 0;
+    return `
+      <section class="goal${g.done ? ' done' : ''}">
+        <div class="goal-head">
+          <button class="check" data-act="goal-toggle" data-id="${g.id}" role="checkbox" aria-checked="${!!g.done}" aria-label="목표 달성 표시">${CHECK_SVG}</button>
+          <button class="goal-title" data-act="goal-rename" data-id="${g.id}" aria-label="목표 이름 바꾸기">${esc(g.title)}</button>
+          <span class="goal-progress">${subs.length ? `${doneSubs}/${subs.length}` : ''}</span>
+          <button class="sub-btn" data-act="goal-delete" data-id="${g.id}" aria-label="목표 삭제">✕</button>
+        </div>
+        <div class="progress" aria-hidden="true"><i style="width:${pct}%"></i></div>
+        ${subs.length ? `<ul class="subtasks">${subs.map((s) => `
+          <li class="sub${s.done ? ' done' : ''}">
+            <button class="check small" data-act="sub-toggle" data-goal="${g.id}" data-id="${s.id}" role="checkbox" aria-checked="${!!s.done}" aria-label="세부 할 일 완료 표시">${CHECK_SVG}</button>
+            <span class="sub-title">${esc(s.title)}</span>
+            <button class="sub-btn" data-act="sub-schedule" data-goal="${g.id}" data-id="${s.id}" aria-label="달력에 일정으로 추가">📅</button>
+            <button class="sub-btn" data-act="sub-delete" data-goal="${g.id}" data-id="${s.id}" aria-label="세부 할 일 삭제">✕</button>
+          </li>`).join('')}</ul>` : ''}
+        <form class="sub-add" data-form="sub-add" data-goal="${g.id}" autocomplete="off">
+          <input name="title" placeholder="세부 할 일 추가" maxlength="100" enterkeyhint="done">
+          <button type="submit" aria-label="세부 할 일 추가">+</button>
+        </form>
+        <button class="ai-link" data-act="goal-ai" data-id="${g.id}">✨ AI로 세부 할 일 만들기</button>
+      </section>`;
   }
 
   // 월간 격자의 날짜 칸 (구글 캘린더 형식)
@@ -355,7 +457,7 @@
     const r = parseRoute();
     const t = new Date();
     if (r.view === 'day') return ymd(r.date);
-    if (r.view === 'month') return ymd(sameMonth(t, r.date) ? t : r.date);
+    if (r.view === 'month' || r.period === 'month') return ymd(sameMonth(t, r.date) ? t : r.date);
     return ymd(t >= r.date && t < addDays(r.date, 7) ? t : r.date);
   }
 
@@ -371,7 +473,7 @@
     document.body.classList.remove('no-scroll');
   }
 
-  function openEditor({ id, date }) {
+  function openEditor({ id, date, title }) {
     const it = id ? db.items.find((i) => i.id === id) : null;
     const catId = it ? it.categoryId : db.categories[0].id;
     openSheet(`
@@ -382,7 +484,7 @@
           <button type="submit" class="text-btn strong">저장</button>
         </div>
         <input type="hidden" name="id" value="${it ? it.id : ''}">
-        <input class="field-title" name="title" placeholder="제목" required maxlength="100" value="${esc(it ? it.title : '')}">
+        <input class="field-title" name="title" placeholder="제목" required maxlength="100" value="${esc(it ? it.title : title || '')}">
         <div class="group">
           <label class="row"><span>날짜</span><input type="date" name="date" required value="${it ? it.date : date || defaultAddDate()}"></label>
           <label class="row"><span>시작</span><input type="time" name="start" value="${it ? it.start || '' : ''}"></label>
@@ -436,7 +538,7 @@
       const data = JSON.parse(text);
       if (!Array.isArray(data.items)) throw new Error('형식 오류');
       if (!confirm(`일정 ${data.items.length}개를 가져올까요?\n현재 일정은 모두 바뀌어요.`)) return;
-      db = { items: data.items, categories: Array.isArray(data.categories) && data.categories.length ? data.categories : DEFAULT_CATEGORIES.slice() };
+      db = normalizeDb(data);
       save();
       closeSheet();
       render({ scroll: 'keep' });
@@ -540,21 +642,146 @@
 </context>`;
   }
 
-  async function askClaude(Anthropic, text) {
+  // 구조화 출력(JSON 스키마)으로 Claude를 한 번 호출하고 파싱한 결과를 돌려준다
+  async function callClaude(Anthropic, { system, content, schema, maxTokens }) {
     const client = new Anthropic({ apiKey: getKey(), dangerouslyAllowBrowser: true });
     const res = await client.messages.create({
       model: AI_MODEL,
-      max_tokens: 4096,
-      system: AI_SYSTEM,
-      messages: [{ role: 'user', content: `${aiContext()}\n\n<request>\n${text}\n</request>` }],
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: aiSchema() } },
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content }],
+      output_config: { effort: 'low', format: { type: 'json_schema', schema } },
     });
     if (res.stop_reason === 'refusal') throw new Error('Claude가 이 요청은 처리하지 않았어요. 다르게 말해볼까요?');
     if (res.stop_reason === 'max_tokens') throw new Error('응답이 너무 길어 잘렸어요. 나눠서 말해주세요.');
     const block = res.content.find((b) => b.type === 'text');
     if (!block) throw new Error('응답을 이해하지 못했어요. 다시 시도해주세요.');
-    const out = JSON.parse(block.text);
+    return JSON.parse(block.text);
+  }
+
+  async function askClaude(Anthropic, text) {
+    const out = await callClaude(Anthropic, {
+      system: AI_SYSTEM,
+      content: `${aiContext()}\n\n<request>\n${text}\n</request>`,
+      schema: aiSchema(),
+      maxTokens: 4096,
+    });
     return { reply: String(out.reply || ''), actions: sanitizeActions(Array.isArray(out.actions) ? out.actions : []) };
+  }
+
+  // ---------- 목표 → 세부 할 일 AI ----------
+  // 토큰 절약: 버튼을 눌러도 바로 호출하지 않고 확인 시트를 거친다. 보내는 내용도 목표 하나와 기존 세부 할 일뿐.
+  const SUBTASK_SYSTEM = `개인 목표를 실행 가능한 세부 할 일로 나누는 도우미입니다.
+- 목표 기간 안에 끝낼 수 있는 구체적인 행동으로 만듭니다. 각 항목은 한 줄, 40자 이내, "~하기"처럼 행동으로 끝냅니다.
+- 요청한 개수만큼, 먼저 할 것부터 순서대로 씁니다.
+- 이미 있는 세부 할 일과 겹치지 않게 합니다.
+- 한국어로 씁니다.`;
+
+  let goalAiState = null;
+
+  function openGoalAi(goalId) {
+    const g = findGoal(goalId);
+    if (!g) return;
+    if (!getKey()) {
+      openKeySetup(false);
+      return;
+    }
+    goalAiState = { goalId, loading: false, result: null, error: '' };
+    openSheet(`
+      <form class="sheet ai-sheet" data-form="goal-ai" role="dialog" aria-modal="true" aria-label="AI로 세부 할 일 만들기" autocomplete="off">
+        <div class="sheet-head">
+          <button type="button" class="text-btn" data-act="close-sheet">취소</button>
+          <h2>✨ 세부 할 일 만들기</h2>
+          <span></span>
+        </div>
+        <p class="ai-goal">🎯 ${esc(g.title)}</p>
+        <p class="hint first">Claude에게 이 목표를 세부 할 일로 나눠 달라고 요청할까요? <b>요청하기</b>를 눌러야 AI를 사용해요. (Haiku 5.5, 1회 약 0.05센트 이하)</p>
+        <div class="group">
+          <div class="row"><span>개수</span>
+            <span class="count-pick">${[3, 5, 7].map((n) => `<label><input type="radio" name="count" value="${n}"${n === 5 ? ' checked' : ''}><span>${n}개</span></label>`).join('')}</span>
+          </div>
+        </div>
+        <textarea name="extra" rows="2" maxlength="300" placeholder="추가 요청 (선택) 예: 평일 저녁 30분 안에 할 수 있는 것 위주로"></textarea>
+        <button type="submit" class="primary" data-ai-send>요청하기</button>
+        <div class="ai-body" aria-live="polite"></div>
+      </form>`);
+  }
+
+  function renderGoalAiBody() {
+    const body = sheetRoot.querySelector('.ai-body');
+    if (!body || !goalAiState) return;
+    const send = sheetRoot.querySelector('[data-ai-send]');
+    send.disabled = goalAiState.loading;
+    send.textContent = goalAiState.loading ? '만드는 중…' : goalAiState.result ? '다시 요청하기' : '요청하기';
+    if (goalAiState.error) {
+      body.innerHTML = `<p class="ai-error">${esc(goalAiState.error)}</p>`;
+      return;
+    }
+    const list = goalAiState.result;
+    if (!list) {
+      body.innerHTML = '';
+      return;
+    }
+    body.innerHTML = list.length ? `
+      <div class="ai-actions">
+        ${list.map((t, i) => `
+          <label class="ai-action">
+            <input type="checkbox" name="pick" value="${i}" checked>
+            <span class="ai-desc">${esc(t)}</span>
+          </label>`).join('')}
+      </div>
+      <button type="button" class="primary" data-act="goal-ai-apply">선택한 세부 할 일 추가</button>` : '<p class="ai-error">만들어진 세부 할 일이 없어요. 추가 요청을 바꿔 다시 시도해보세요.</p>';
+  }
+
+  async function runGoalAi(count, extra) {
+    const g = findGoal(goalAiState.goalId);
+    if (!g) return;
+    goalAiState = { goalId: g.id, loading: true, result: null, error: '' };
+    renderGoalAiBody();
+    let Anthropic;
+    try {
+      Anthropic = await loadSdk();
+    } catch (e) {
+      goalAiState = { goalId: g.id, loading: false, result: null, error: 'Claude 연결 모듈을 불러오지 못했어요. 인터넷 연결을 확인해주세요.' };
+      renderGoalAiBody();
+      return;
+    }
+    const start = g.period === 'week' ? parseYmd(g.key) : parseYmd(`${g.key}-01`);
+    const existing = (g.subtasks || []).map((s) => `- ${s.title}`).join('\n') || '없음';
+    try {
+      const out = await callClaude(Anthropic, {
+        system: SUBTASK_SYSTEM,
+        content: `<goal>${g.title}</goal>
+기간: ${g.period === 'week' ? '주간' : '월간'} 목표, ${periodLabel(g.period, start)}
+오늘: ${todayStr()}
+이미 있는 세부 할 일:
+${existing}
+만들 개수: ${count}${extra ? `\n<extra_request>${extra}</extra_request>` : ''}`,
+        schema: {
+          type: 'object',
+          properties: { subtasks: { type: 'array', items: { type: 'string' } } },
+          required: ['subtasks'],
+          additionalProperties: false,
+        },
+        maxTokens: 2048,
+      });
+      const have = new Set((g.subtasks || []).map((s) => s.title));
+      const list = (Array.isArray(out.subtasks) ? out.subtasks : [])
+        .map((t) => String(t).trim().slice(0, 100))
+        .filter((t) => t && !have.has(t) && (have.add(t), true))
+        .slice(0, count);
+      goalAiState = { goalId: g.id, loading: false, result: list, error: '' };
+    } catch (e) {
+      goalAiState = { goalId: g.id, loading: false, result: null, error: aiErrorMessage(e, Anthropic) };
+    }
+    renderGoalAiBody();
+  }
+
+  function addSubtasks(g, titles) {
+    g.subtasks = g.subtasks || [];
+    for (const title of titles) g.subtasks.push({ id: uid(), title, done: false });
+    if (titles.length) g.done = false;
+    touchGoal(g);
   }
 
   // Claude가 돌려준 변경안을 검증: 존재하지 않는 id, 잘못된 날짜·시간은 버리거나 비운다
@@ -724,11 +951,89 @@
       case 'prev':
       case 'next': {
         const step = el.dataset.act === 'prev' ? -1 : 1;
-        if (r.view === 'month') go(monthHash(new Date(r.date.getFullYear(), r.date.getMonth() + step, 1)));
+        if (r.view === 'goals') {
+          // 목표 화면 안의 기간 이동은 기록을 쌓지 않는다 (‹ 달력 한 번으로 돌아가게)
+          location.replace(goalsHash(r.period, r.period === 'week' ? addDays(r.date, 7 * step) : new Date(r.date.getFullYear(), r.date.getMonth() + step, 1)));
+        } else if (r.view === 'month') go(monthHash(new Date(r.date.getFullYear(), r.date.getMonth() + step, 1)));
         else go(weekHash(addDays(r.date, 7 * step)));
         break;
       }
+      case 'goals-open':
+        goalsReturn = location.hash;
+        go(goalsHash(r.view === 'week' ? 'week' : 'month', r.view === 'week' ? r.date : sameMonth(new Date(), r.date) ? new Date() : r.date));
+        break;
+      case 'goals-back':
+        if (goalsReturn) { goalsReturn = null; history.back(); } else go(r.period === 'week' ? weekHash(r.date) : monthHash(r.date));
+        break;
+      case 'goals-week':
+        if (r.period !== 'week') location.replace(goalsHash('week', sameMonth(new Date(), r.date) ? new Date() : r.date));
+        break;
+      case 'goals-month':
+        if (r.period !== 'month') location.replace(goalsHash('month', addDays(r.date, 3)));
+        break;
+      case 'goal-toggle': {
+        const g = findGoal(el.dataset.id);
+        if (g) { g.done = !g.done; touchGoal(g); render({ scroll: 'keep' }); }
+        break;
+      }
+      case 'goal-rename': {
+        const g = findGoal(el.dataset.id);
+        const title = g && prompt('목표 이름', g.title);
+        if (title && title.trim()) { g.title = title.trim().slice(0, 100); touchGoal(g); render({ scroll: 'keep' }); }
+        break;
+      }
+      case 'goal-delete': {
+        const g = findGoal(el.dataset.id);
+        if (g && confirm(`"${g.title}" 목표와 세부 할 일을 모두 삭제할까요?`)) {
+          db.goals = db.goals.filter((x) => x.id !== g.id);
+          save();
+          render({ scroll: 'keep' });
+        }
+        break;
+      }
+      case 'sub-toggle': {
+        const g = findGoal(el.dataset.goal);
+        const s = g && g.subtasks.find((x) => x.id === el.dataset.id);
+        if (s) {
+          s.done = !s.done;
+          g.done = g.subtasks.every((x) => x.done); // 세부 할 일을 모두 끝내면 목표도 달성
+          touchGoal(g);
+          render({ scroll: 'keep' });
+        }
+        break;
+      }
+      case 'sub-delete': {
+        const g = findGoal(el.dataset.goal);
+        if (g) { g.subtasks = g.subtasks.filter((x) => x.id !== el.dataset.id); touchGoal(g); render({ scroll: 'keep' }); }
+        break;
+      }
+      case 'sub-schedule': {
+        const g = findGoal(el.dataset.goal);
+        const s = g && g.subtasks.find((x) => x.id === el.dataset.id);
+        if (s) openEditor({ title: s.title });
+        break;
+      }
+      case 'goal-ai':
+        openGoalAi(el.dataset.id);
+        break;
+      case 'goal-ai-apply': {
+        const g = goalAiState && findGoal(goalAiState.goalId);
+        const picks = [...sheetRoot.querySelectorAll('input[name="pick"]:checked')].map((i) => goalAiState.result[Number(i.value)]);
+        if (!g || !picks.length) {
+          alert('추가할 세부 할 일을 하나 이상 선택해주세요.');
+          break;
+        }
+        addSubtasks(g, picks);
+        closeSheet();
+        render({ scroll: 'keep' });
+        toast(`세부 할 일 ${picks.length}개를 추가했어요`);
+        break;
+      }
       case 'today': {
+        if (r.view === 'goals') {
+          location.replace(goalsHash(r.period, new Date()));
+          break;
+        }
         const h = r.view === 'week' ? weekHash(new Date()) : monthHash(new Date());
         delete scrollMemo[h];
         go(h);
@@ -828,6 +1133,37 @@
       return;
     }
 
+    if (form.dataset.form === 'goal-add') {
+      const input = form.elements.namedItem('title');
+      const title = input.value.trim().slice(0, 100);
+      if (!title) return;
+      const r = parseRoute();
+      const now = new Date().toISOString();
+      db.goals.push({ id: uid(), period: r.period, key: periodKey(r.period, r.date), title, done: false, subtasks: [], createdAt: now, updatedAt: now });
+      save();
+      render({ scroll: 'keep' });
+      app.querySelector('[data-form="goal-add"] input').focus();
+      return;
+    }
+
+    if (form.dataset.form === 'sub-add') {
+      const g = findGoal(form.dataset.goal);
+      const title = form.elements.namedItem('title').value.trim().slice(0, 100);
+      if (!g || !title) return;
+      addSubtasks(g, [title]);
+      render({ scroll: 'keep' });
+      const again = app.querySelector(`[data-form="sub-add"][data-goal="${g.id}"] input`);
+      if (again) again.focus();
+      return;
+    }
+
+    if (form.dataset.form === 'goal-ai') {
+      if (goalAiState && goalAiState.loading) return;
+      const fd = new FormData(form);
+      runGoalAi(Number(fd.get('count')) || 5, String(fd.get('extra') || '').trim());
+      return;
+    }
+
     if (form.dataset.form === 'ai') {
       const text = form.elements.namedItem('text').value.trim();
       if (text && !(aiState && aiState.loading)) runAi(text);
@@ -910,7 +1246,7 @@
     if (!document.hidden && !sheetRoot.classList.contains('open')) render({ scroll: 'keep' });
   });
 
-  if (!/^#\/(month|week|day)\//.test(location.hash)) {
+  if (!/^#\/(month|week|day|goals)\//.test(location.hash)) {
     history.replaceState(null, '', monthHash(new Date()));
   }
   render();
