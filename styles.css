@@ -647,6 +647,54 @@ button {
 
 .ai-sheet .group + textarea { margin-top: 12px; }
 
+.link-btn {
+  color: var(--accent);
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+/* 채팅 복사·붙여넣기 */
+.relay {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1.5px dashed color-mix(in srgb, var(--ai) 45%, var(--line));
+}
+
+.relay-step { margin: 4px 2px 8px; font-size: 14px; line-height: 1.45; }
+.relay-step b { color: var(--ai); }
+
+.ai-sheet .relay textarea { margin-top: 0; }
+
+.relay-prompt {
+  font-size: 12px !important;
+  color: var(--muted) !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+}
+
+.relay-btns {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.relay-btns .primary { flex: 1; background: var(--ai); }
+
+.secondary {
+  flex: none;
+  display: grid;
+  place-items: center;
+  margin-top: 10px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1.5px solid var(--ai);
+  color: var(--ai);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.relay > .primary:last-child { margin-top: 10px; }
+
 /* ---------- 추가 버튼 ---------- */
 .fab {
   position: fixed;

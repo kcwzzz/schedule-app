@@ -513,8 +513,10 @@
           <button class="row" data-act="import"><span>백업 파일 가져오기</span><span class="chev">›</span></button>
         </div>
         <div class="group menu">
+          <button class="row" data-act="ai-mode-switch"><span>AI 연결 방식</span><span class="chev">${getAiMode() === 'chat' ? '채팅 복사·붙여넣기' : 'API'} ⇄</span></button>
           <button class="row" data-act="key-setup"><span>Claude API 키 설정</span><span class="chev">${getKey() ? '저장됨 ›' : '›'}</span></button>
         </div>
+        <p class="hint">채팅 복사·붙여넣기: 앱이 만든 요청문을 Claude 채팅에 붙여넣고 답을 다시 붙여넣어요(API 비용 없음, 테스트용). API: 키를 넣으면 앱이 바로 Claude를 불러요.</p>
         <p class="hint">일정은 이 기기의 브라우저에만 저장돼요. 가끔 백업 파일을 내보내 두세요. (저장된 일정 ${db.items.length}개)</p>
       </div>`);
   }
@@ -659,14 +661,112 @@
     return JSON.parse(block.text);
   }
 
-  async function askClaude(Anthropic, text) {
-    const out = await callClaude(Anthropic, {
-      system: AI_SYSTEM,
-      content: `${aiContext()}\n\n<request>\n${text}\n</request>`,
-      schema: aiSchema(),
-      maxTokens: 4096,
-    });
-    return { reply: String(out.reply || ''), actions: sanitizeActions(Array.isArray(out.actions) ? out.actions : []) };
+  // ---------- AI 연결 방식 ----------
+  // chat(기본, 테스트용): 요청문을 Claude 채팅에 복사해 붙여넣고, 답을 다시 앱에 붙여넣는다. API 비용 없음.
+  // api: Anthropic API로 바로 호출 (API 키 필요).
+  const AI_MODE_STORE = 'schedule-app:ai-mode';
+
+  function getAiMode() {
+    try { return localStorage.getItem(AI_MODE_STORE) === 'api' ? 'api' : 'chat'; } catch (e) { return 'chat'; }
+  }
+
+  function setAiMode(mode) {
+    try { localStorage.setItem(AI_MODE_STORE, mode); } catch (e) { /* 저장 실패 시 이번 세션만 기본값 */ }
+  }
+
+  const aiModeName = (mode) => (mode === 'chat' ? 'Claude 채팅 복사·붙여넣기' : 'API (Haiku 5.5)');
+
+  function chatPrompt(req) {
+    return `일정 앱이 보낸 요청입니다. 아래 지시를 따르고, 설명 없이 JSON 코드블록 하나로만 답해주세요.
+
+<instructions>
+${req.system}
+</instructions>
+
+${req.content}
+
+<output_format>
+아래 JSON 스키마를 따르는 JSON 객체 하나를 \`\`\`json 코드블록으로 답하세요. required 필드는 모두 채웁니다.
+${JSON.stringify(req.schema)}
+</output_format>`;
+  }
+
+  // Claude 채팅 답변에서 JSON 객체를 꺼낸다 (코드블록이 있으면 그 안, 없으면 첫 { ~ 마지막 })
+  function extractJson(text) {
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const s = fence ? fence[1] : text;
+    const a = s.indexOf('{');
+    const b = s.lastIndexOf('}');
+    if (a < 0 || b <= a) throw new Error('답변에서 JSON을 찾지 못했어요. Claude 답변 전체를 복사해서 붙여넣어 주세요.');
+    try {
+      return JSON.parse(s.slice(a, b + 1));
+    } catch (e) {
+      throw new Error('JSON 형식이 올바르지 않아요. 답변을 빠짐없이 복사했는지 확인해주세요.');
+    }
+  }
+
+  let relayFinish = null; // 채팅 방식: 붙여넣은 답을 처리할 함수
+
+  // 요청 하나를 연결 방식에 따라 처리. finish(out)는 JSON을 화면용 결과로 바꾸고, update(patch)는 상태를 갱신·렌더한다.
+  async function dispatchAi(req, finish, update) {
+    if (getAiMode() === 'chat') {
+      relayFinish = (answer) => {
+        update({ relayAnswer: answer });
+        try {
+          update({ result: finish(extractJson(answer)), error: '' });
+        } catch (e) {
+          update({ error: e.message });
+        }
+      };
+      update({ loading: false, result: null, error: '', relay: chatPrompt(req), relayAnswer: '' });
+      return;
+    }
+    update({ loading: true, result: null, error: '', relay: null });
+    let Anthropic;
+    try {
+      Anthropic = await loadSdk();
+    } catch (e) {
+      update({ loading: false, error: 'Claude 연결 모듈을 불러오지 못했어요. 인터넷 연결을 확인해주세요.' });
+      return;
+    }
+    try {
+      update({ loading: false, result: finish(await callClaude(Anthropic, req)) });
+    } catch (e) {
+      update({ loading: false, error: aiErrorMessage(e, Anthropic) });
+    }
+  }
+
+  function relayHtml(state) {
+    return `
+      <div class="relay">
+        <p class="relay-step"><b>①</b> 요청문을 복사해서 Claude 채팅에 붙여넣으세요</p>
+        <textarea class="relay-prompt" readonly rows="4" aria-label="Claude에게 보낼 요청문">${esc(state.relay)}</textarea>
+        <div class="relay-btns">
+          <button type="button" class="primary" data-act="relay-copy">요청문 복사</button>
+          <a class="secondary" href="https://claude.ai/new" target="_blank" rel="noopener">Claude 열기 ↗</a>
+        </div>
+        <p class="relay-step"><b>②</b> Claude의 답변을 복사해서 여기에 붙여넣으세요</p>
+        <textarea class="relay-answer" rows="4" placeholder="답변 전체를 붙여넣어도 돼요">${esc(state.relayAnswer || '')}</textarea>
+        <button type="button" class="primary" data-act="relay-parse">답변 확인하기</button>
+      </div>`;
+  }
+
+  function aiModeHint() {
+    return `<p class="hint first">연결: <b>${aiModeName(getAiMode())}</b> · <button type="button" class="link-btn" data-act="ai-mode-switch">바꾸기</button></p>`;
+  }
+
+  async function copyText(text, fallbackEl) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) { /* 아래 방식으로 재시도 */ }
+    try {
+      fallbackEl.focus();
+      fallbackEl.select();
+      return document.execCommand('copy');
+    } catch (e) {
+      return false;
+    }
   }
 
   // ---------- 목표 → 세부 할 일 AI ----------
@@ -682,11 +782,12 @@
   function openGoalAi(goalId) {
     const g = findGoal(goalId);
     if (!g) return;
-    if (!getKey()) {
+    const chat = getAiMode() === 'chat';
+    if (!chat && !getKey()) {
       openKeySetup(false);
       return;
     }
-    goalAiState = { goalId, loading: false, result: null, error: '' };
+    goalAiState = { goalId, loading: false, result: null, error: '', relay: null };
     openSheet(`
       <form class="sheet ai-sheet" data-form="goal-ai" role="dialog" aria-modal="true" aria-label="AI로 세부 할 일 만들기" autocomplete="off">
         <div class="sheet-head">
@@ -695,86 +796,79 @@
           <span></span>
         </div>
         <p class="ai-goal">🎯 ${esc(g.title)}</p>
-        <p class="hint first">Claude에게 이 목표를 세부 할 일로 나눠 달라고 요청할까요? <b>요청하기</b>를 눌러야 AI를 사용해요. (Haiku 5.5, 1회 약 0.05센트 이하)</p>
+        <p class="hint first">${chat
+          ? 'Claude 채팅에 붙여넣을 요청문을 만들어요. API 비용은 들지 않아요.'
+          : 'Claude에게 이 목표를 세부 할 일로 나눠 달라고 요청할까요? <b>요청하기</b>를 눌러야 AI를 사용해요. (Haiku 5.5, 1회 약 0.05센트 이하)'}</p>
+        ${aiModeHint()}
         <div class="group">
           <div class="row"><span>개수</span>
             <span class="count-pick">${[3, 5, 7].map((n) => `<label><input type="radio" name="count" value="${n}"${n === 5 ? ' checked' : ''}><span>${n}개</span></label>`).join('')}</span>
           </div>
         </div>
         <textarea name="extra" rows="2" maxlength="300" placeholder="추가 요청 (선택) 예: 평일 저녁 30분 안에 할 수 있는 것 위주로"></textarea>
-        <button type="submit" class="primary" data-ai-send>요청하기</button>
+        <button type="submit" class="primary" data-ai-send>${chat ? '요청문 만들기' : '요청하기'}</button>
         <div class="ai-body" aria-live="polite"></div>
       </form>`);
   }
 
   function renderGoalAiBody() {
     const body = sheetRoot.querySelector('.ai-body');
-    if (!body || !goalAiState) return;
+    const s = goalAiState;
+    if (!body || !s) return;
     const send = sheetRoot.querySelector('[data-ai-send]');
-    send.disabled = goalAiState.loading;
-    send.textContent = goalAiState.loading ? '만드는 중…' : goalAiState.result ? '다시 요청하기' : '요청하기';
-    if (goalAiState.error) {
-      body.innerHTML = `<p class="ai-error">${esc(goalAiState.error)}</p>`;
-      return;
+    send.disabled = s.loading;
+    send.textContent = s.loading ? '만드는 중…'
+      : getAiMode() === 'chat' ? (s.relay || s.result ? '요청문 다시 만들기' : '요청문 만들기')
+        : s.result ? '다시 요청하기' : '요청하기';
+    let html = '';
+    if (s.relay && !s.result) html += relayHtml(s);
+    if (s.error) html += `<p class="ai-error">${esc(s.error)}</p>`;
+    if (s.result) {
+      html += s.result.length ? `
+        <div class="ai-actions">
+          ${s.result.map((t, i) => `
+            <label class="ai-action">
+              <input type="checkbox" name="pick" value="${i}" checked>
+              <span class="ai-desc">${esc(t)}</span>
+            </label>`).join('')}
+        </div>
+        <button type="button" class="primary" data-act="goal-ai-apply">선택한 세부 할 일 추가</button>` : '<p class="ai-error">만들어진 세부 할 일이 없어요. 추가 요청을 바꿔 다시 시도해보세요.</p>';
     }
-    const list = goalAiState.result;
-    if (!list) {
-      body.innerHTML = '';
-      return;
-    }
-    body.innerHTML = list.length ? `
-      <div class="ai-actions">
-        ${list.map((t, i) => `
-          <label class="ai-action">
-            <input type="checkbox" name="pick" value="${i}" checked>
-            <span class="ai-desc">${esc(t)}</span>
-          </label>`).join('')}
-      </div>
-      <button type="button" class="primary" data-act="goal-ai-apply">선택한 세부 할 일 추가</button>` : '<p class="ai-error">만들어진 세부 할 일이 없어요. 추가 요청을 바꿔 다시 시도해보세요.</p>';
+    body.innerHTML = html;
   }
 
-  async function runGoalAi(count, extra) {
+  function runGoalAi(count, extra) {
     const g = findGoal(goalAiState.goalId);
     if (!g) return;
-    goalAiState = { goalId: g.id, loading: true, result: null, error: '' };
-    renderGoalAiBody();
-    let Anthropic;
-    try {
-      Anthropic = await loadSdk();
-    } catch (e) {
-      goalAiState = { goalId: g.id, loading: false, result: null, error: 'Claude 연결 모듈을 불러오지 못했어요. 인터넷 연결을 확인해주세요.' };
-      renderGoalAiBody();
-      return;
-    }
     const start = g.period === 'week' ? parseYmd(g.key) : parseYmd(`${g.key}-01`);
     const existing = (g.subtasks || []).map((s) => `- ${s.title}`).join('\n') || '없음';
-    try {
-      const out = await callClaude(Anthropic, {
-        system: SUBTASK_SYSTEM,
-        content: `<goal>${g.title}</goal>
+    const req = {
+      system: SUBTASK_SYSTEM,
+      content: `<goal>${g.title}</goal>
 기간: ${g.period === 'week' ? '주간' : '월간'} 목표, ${periodLabel(g.period, start)}
 오늘: ${todayStr()}
 이미 있는 세부 할 일:
 ${existing}
 만들 개수: ${count}${extra ? `\n<extra_request>${extra}</extra_request>` : ''}`,
-        schema: {
-          type: 'object',
-          properties: { subtasks: { type: 'array', items: { type: 'string' } } },
-          required: ['subtasks'],
-          additionalProperties: false,
-        },
-        maxTokens: 2048,
-      });
+      schema: {
+        type: 'object',
+        properties: { subtasks: { type: 'array', items: { type: 'string' } } },
+        required: ['subtasks'],
+        additionalProperties: false,
+      },
+      maxTokens: 2048,
+    };
+    const finish = (out) => {
       const have = new Set((g.subtasks || []).map((s) => s.title));
-      const list = (Array.isArray(out.subtasks) ? out.subtasks : [])
+      return (Array.isArray(out.subtasks) ? out.subtasks : [])
         .map((t) => String(t).trim().slice(0, 100))
         .filter((t) => t && !have.has(t) && (have.add(t), true))
         .slice(0, count);
-      goalAiState = { goalId: g.id, loading: false, result: list, error: '' };
-    } catch (e) {
-      goalAiState = { goalId: g.id, loading: false, result: null, error: aiErrorMessage(e, Anthropic) };
-    }
-    renderGoalAiBody();
+    };
+    dispatchAi(req, finish, (patch) => {
+      goalAiState = Object.assign({}, goalAiState, patch);
+      renderGoalAiBody();
+    });
   }
 
   function addSubtasks(g, titles) {
@@ -825,11 +919,12 @@ ${existing}
   }
 
   function openAi() {
-    if (!getKey()) {
+    const chat = getAiMode() === 'chat';
+    if (!chat && !getKey()) {
       openKeySetup(true);
       return;
     }
-    aiState = { loading: false, result: null, error: '' };
+    aiState = { loading: false, result: null, error: '', relay: null };
     openSheet(`
       <form class="sheet ai-sheet" data-form="ai" role="dialog" aria-modal="true" aria-label="Claude 비서" autocomplete="off">
         <div class="sheet-head">
@@ -837,8 +932,9 @@ ${existing}
           <h2>✨ Claude 비서</h2>
           <span></span>
         </div>
+        ${aiModeHint()}
         <textarea name="text" rows="3" maxlength="1000" placeholder="예: 오늘 7시에 퇴근해서 운동할 거야&#10;예: 내일 치과 3시로 옮겨줘"></textarea>
-        <button type="submit" class="primary" data-ai-send>보내기</button>
+        <button type="submit" class="primary" data-ai-send>${chat ? '요청문 만들기' : '보내기'}</button>
         <div class="ai-body" aria-live="polite"></div>
       </form>`);
     sheetRoot.querySelector('textarea').focus();
@@ -857,54 +953,46 @@ ${existing}
 
   function renderAiBody() {
     const body = sheetRoot.querySelector('.ai-body');
-    if (!body || !aiState) return;
+    const s = aiState;
+    if (!body || !s) return;
     const send = sheetRoot.querySelector('[data-ai-send]');
-    send.disabled = aiState.loading;
-    send.textContent = aiState.loading ? '생각하는 중…' : '보내기';
+    send.disabled = s.loading;
+    send.textContent = s.loading ? '생각하는 중…'
+      : getAiMode() === 'chat' ? (s.relay || s.result ? '요청문 다시 만들기' : '요청문 만들기') : '보내기';
 
-    if (aiState.error) {
-      body.innerHTML = `<p class="ai-error">${esc(aiState.error)}</p>`;
-      return;
+    let html = '';
+    if (s.relay && !s.result) html += relayHtml(s);
+    if (s.error) html += `<p class="ai-error">${esc(s.error)}</p>`;
+    const r = s.result;
+    if (r) {
+      const opName = { create: '추가', update: '수정', delete: '삭제' };
+      html += `
+        ${r.reply ? `<p class="ai-reply">${esc(r.reply)}</p>` : ''}
+        ${r.actions.length ? `
+          <div class="ai-actions">
+            ${r.actions.map((a, i) => `
+              <label class="ai-action">
+                <input type="checkbox" name="pick" value="${i}" checked>
+                <span class="ai-op op-${a.op}">${opName[a.op]}</span>
+                <span class="ai-desc">${aiActionLabel(a)}</span>
+              </label>`).join('')}
+          </div>
+          <button type="button" class="primary" data-act="ai-apply">선택한 일정 반영하기</button>` : ''}`;
     }
-    const r = aiState.result;
-    if (!r) {
-      body.innerHTML = '';
-      return;
-    }
-    const opName = { create: '추가', update: '수정', delete: '삭제' };
-    body.innerHTML = `
-      ${r.reply ? `<p class="ai-reply">${esc(r.reply)}</p>` : ''}
-      ${r.actions.length ? `
-        <div class="ai-actions">
-          ${r.actions.map((a, i) => `
-            <label class="ai-action">
-              <input type="checkbox" name="pick" value="${i}" checked>
-              <span class="ai-op op-${a.op}">${opName[a.op]}</span>
-              <span class="ai-desc">${aiActionLabel(a)}</span>
-            </label>`).join('')}
-        </div>
-        <button type="button" class="primary" data-act="ai-apply">선택한 일정 반영하기</button>` : ''}`;
+    body.innerHTML = html;
   }
 
-  async function runAi(text) {
-    aiState = { loading: true, result: null, error: '' };
-    renderAiBody();
-    let Anthropic;
-    try {
-      Anthropic = await loadSdk();
-    } catch (e) {
-      aiState = { loading: false, result: null, error: 'Claude 연결 모듈을 불러오지 못했어요. 인터넷 연결을 확인해주세요.' };
-      renderAiBody();
-      return;
-    }
-    try {
-      const result = await askClaude(Anthropic, text);
+  function runAi(text) {
+    const req = { system: AI_SYSTEM, content: `${aiContext()}\n\n<request>\n${text}\n</request>`, schema: aiSchema(), maxTokens: 4096 };
+    const finish = (out) => {
+      const result = { reply: String(out.reply || ''), actions: sanitizeActions(Array.isArray(out.actions) ? out.actions : []) };
       if (!result.reply && !result.actions.length) result.reply = '반영할 일정을 찾지 못했어요. 조금 더 구체적으로 말해주세요.';
-      aiState = { loading: false, result, error: '' };
-    } catch (e) {
-      aiState = { loading: false, result: null, error: aiErrorMessage(e, Anthropic) };
-    }
-    renderAiBody();
+      return result;
+    };
+    dispatchAi(req, finish, (patch) => {
+      aiState = Object.assign({}, aiState, patch);
+      renderAiBody();
+    });
   }
 
   function applyAiActions(actions) {
@@ -1016,6 +1104,35 @@ ${existing}
       case 'goal-ai':
         openGoalAi(el.dataset.id);
         break;
+      case 'relay-copy': {
+        const ta = sheetRoot.querySelector('.relay-prompt');
+        if (ta) copyText(ta.value, ta).then((ok) => toast(ok ? '요청문을 복사했어요. Claude 채팅에 붙여넣으세요' : '복사하지 못했어요. 요청문을 길게 눌러 직접 복사해주세요'));
+        break;
+      }
+      case 'relay-parse': {
+        const ta = sheetRoot.querySelector('.relay-answer');
+        const answer = ta ? ta.value.trim() : '';
+        if (!answer) alert('Claude의 답변을 붙여넣어 주세요.');
+        else if (relayFinish) relayFinish(answer);
+        break;
+      }
+      case 'ai-mode-switch': {
+        const next = getAiMode() === 'chat' ? 'api' : 'chat';
+        setAiMode(next);
+        toast(`AI 연결: ${aiModeName(next)}`);
+        const form = el.closest('form');
+        if (form && form.dataset.form === 'ai') {
+          const text = form.elements.namedItem('text').value;
+          openAi();
+          const ta = sheetRoot.querySelector('[data-form="ai"] textarea[name="text"]');
+          if (ta) ta.value = text;
+        } else if (form && form.dataset.form === 'goal-ai' && goalAiState) {
+          openGoalAi(goalAiState.goalId);
+        } else {
+          openMenu();
+        }
+        break;
+      }
       case 'goal-ai-apply': {
         const g = goalAiState && findGoal(goalAiState.goalId);
         const picks = [...sheetRoot.querySelectorAll('input[name="pick"]:checked')].map((i) => goalAiState.result[Number(i.value)]);
